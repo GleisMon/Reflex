@@ -1,0 +1,368 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Reflex</title>
+<!--
+  ============================================================================
+  REFLEX — веб-табло (экран оповещения) для игры на реакцию на ESP8266.
+  ----------------------------------------------------------------------------
+  Только ВЫВОД. Ввода с экрана нет: играют физическими кнопками (замыкатели
+  на GND -> цифровые входы ESP8266). Веб зеркалит OLED.
+
+  Настройки управляются ТОЛЬКО отсюда и (на железе) сохраняются в NVM ESP:
+    язык · звук вкл/выкл · визуальная тема · звуковая тема.
+  Имя "Reflex" не переводится; локализуется вся остальная обвязка.
+
+  Автономно (без интернета/CDN) — таким ESP отдаёт страницу по Wi-Fi.
+  СЕЙЧАС крутится демо-самопрогон; на железе его заменит состояние по
+  WebSocket: ESP -> телефон. render(STATE) и звук остаются те же.
+  В этом превью настройки живут в памяти вкладки (в песочнице нет NVM);
+  на железе их хранит ESP.
+  ============================================================================
+-->
+<style>
+/* база = тема DOOM; остальные темы переопределяют переменные на body[data-theme] */
+:root{
+  --bg:#080605; --panel:#17110d; --panel-hi:#2a201a; --panel-lo:#0c0805;
+  --blood:#c41f17; --ember:#ff7a1a; --gold:#f3b13a; --bone:#d9cfc0;
+  --toxic:#5fd83a; --ash:#7d736a; --screen:#120b07; --scan:rgba(0,0,0,.32);
+  --aber1:#c41f17; --aber2:#18b6c4;
+}
+body[data-theme="fallout"]{--bg:#04130a;--panel:#0a1f12;--panel-hi:#143a22;--panel-lo:#03100a;
+  --blood:#46e35a;--ember:#9bff6b;--gold:#e3b341;--bone:#bfe9c0;--toxic:#caffbf;--ash:#5f7d63;--screen:#05160c;--aber1:#0a5;--aber2:#2fd;}
+body[data-theme="gray"]{--bg:#0a0a0a;--panel:#161616;--panel-hi:#262626;--panel-lo:#0a0a0a;
+  --blood:#bdbdbd;--ember:#e6e6e6;--gold:#ffffff;--bone:#cfcfcf;--toxic:#f2f2f2;--ash:#7a7a7a;--screen:#101010;--aber1:#888;--aber2:#bbb;}
+body[data-theme="amber"]{--bg:#0a0600;--panel:#1a0f00;--panel-hi:#2a1c05;--panel-lo:#0a0600;
+  --blood:#ff7b00;--ember:#ffae33;--gold:#ffd24a;--bone:#ffcf8a;--toxic:#ffd24a;--ash:#9c7a3a;--screen:#160c00;--aber1:#a50;--aber2:#fd6;}
+body[data-theme="neon"]{--bg:#0a0420;--panel:#170c36;--panel-hi:#241246;--panel-lo:#07021a;
+  --blood:#ff2e88;--ember:#ff6ec7;--gold:#19e6ff;--bone:#e7d9ff;--toxic:#7CFF6B;--ash:#7e6fb0;--screen:#0b0426;--aber1:#ff2e88;--aber2:#19e6ff;}
+
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:radial-gradient(120% 80% at 50% -10%, color-mix(in srgb,var(--panel) 70%,#000) 0%, var(--bg) 60%),var(--bg);
+  color:var(--bone);font-family:"Courier New",Consolas,"DejaVu Sans Mono",monospace;
+  display:flex;flex-direction:column;align-items:center;padding:14px 10px 28px;gap:14px;
+  min-height:100%;-webkit-user-select:none;user-select:none;overflow-x:hidden;transition:background .3s}
+.cabinet{width:min(440px,96vw);
+  background:linear-gradient(180deg,var(--panel-hi),var(--panel) 14%,var(--panel) 86%,var(--panel-lo));
+  border:2px solid #000;border-radius:18px;padding:14px;
+  box-shadow:0 0 0 3px #000,inset 0 2px 0 rgba(255,255,255,.05),inset 0 -3px 8px rgba(0,0,0,.6),0 22px 50px rgba(0,0,0,.7)}
+.brand{display:flex;align-items:center;justify-content:space-between;
+  font-weight:700;letter-spacing:.2em;font-size:14px;color:var(--ash);padding:0 4px 10px;text-transform:uppercase}
+.brand .logo{color:var(--blood);text-shadow:0 0 10px var(--blood)}
+.brand .tag{font-size:10px;letter-spacing:.16em;border:1px solid var(--panel-hi);border-radius:4px;padding:2px 6px}
+
+.crt-bezel{background:linear-gradient(180deg,var(--panel-hi),var(--panel-lo));border-radius:14px;padding:12px;
+  border:1px solid #000;box-shadow:inset 0 0 0 2px #000,inset 0 0 14px rgba(0,0,0,.9)}
+.crt{position:relative;overflow:hidden;aspect-ratio:5/3;width:100%;
+  background:radial-gradient(130% 120% at 50% 50%,color-mix(in srgb,var(--screen) 70%,#1a120c) 0%,var(--screen) 70%,#050302 100%);
+  border-radius:11px;box-shadow:inset 0 0 60px rgba(0,0,0,.9);
+  display:flex;align-items:center;justify-content:center;text-align:center;filter:saturate(1.05)}
+.crt-inner{position:relative;z-index:1;width:100%;padding:8px 12px}
+.crt::before{content:"";position:absolute;inset:0;z-index:3;pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent 0,transparent 2px,var(--scan) 2px,var(--scan) 3px);mix-blend-mode:multiply}
+.crt::after{content:"";position:absolute;inset:0;z-index:4;pointer-events:none;
+  background:radial-gradient(120% 120% at 50% 50%,transparent 55%,rgba(0,0,0,.55) 100%);animation:flicker .12s steps(2) infinite}
+@keyframes flicker{0%{opacity:.96}50%{opacity:1}100%{opacity:.97}}
+.flash{position:absolute;inset:0;z-index:6;pointer-events:none;background:var(--blood);opacity:0;mix-blend-mode:screen}
+.flash.fire{animation:flash .42s ease-out}
+@keyframes flash{0%{opacity:.85}100%{opacity:0}}
+.crt.shake{animation:shake .42s cubic-bezier(.36,.07,.19,.97)}
+@keyframes shake{10%{transform:translate(-3px,1px)}20%{transform:translate(4px,-2px)}30%{transform:translate(-5px,2px)}
+  40%{transform:translate(3px,3px)}50%{transform:translate(-2px,-1px)}60%{transform:translate(4px,1px)}
+  70%{transform:translate(-3px,-2px)}80%{transform:translate(2px,2px)}100%{transform:translate(0,0)}}
+
+.title{font-size:clamp(13px,4.4vw,20px);letter-spacing:.14em;font-weight:700;
+  color:var(--ember);text-shadow:0 0 10px var(--ember);text-transform:uppercase}
+.sub{font-size:clamp(10px,3vw,13px);color:var(--ash);letter-spacing:.1em;margin-top:6px}
+.hint{font-size:clamp(9px,2.7vw,12px);color:var(--ash);margin-top:12px;letter-spacing:.05em}
+.huge{font-size:clamp(38px,15vw,80px);font-weight:800;letter-spacing:.03em;line-height:1;color:#fff;
+  text-shadow:-3px 0 var(--aber1),3px 0 var(--aber2),0 0 24px rgba(255,255,255,.5)}
+.count{font-size:clamp(54px,20vw,96px);font-weight:800;color:var(--toxic);text-shadow:0 0 22px var(--toxic);line-height:1}
+.regdots{display:flex;gap:14px;justify-content:center;margin:10px 0 4px}
+.regdot{width:clamp(26px,8vw,38px);height:clamp(26px,8vw,38px);border-radius:8px;border:2px solid #000;
+  background:var(--panel);color:var(--ash);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;box-shadow:inset 0 0 6px #000}
+.regdot.on{background:var(--toxic);color:#04130a;border-color:var(--toxic);box-shadow:0 0 14px var(--toxic)}
+.rate{display:flex;flex-direction:column;gap:5px;margin-top:4px}
+.row{display:flex;align-items:center;justify-content:space-between;font-size:clamp(13px,4.4vw,18px);font-weight:700;letter-spacing:.04em}
+.row .p{color:var(--bone);min-width:2.4em;text-align:left}
+.row .sc{color:var(--gold);text-shadow:0 0 8px var(--gold);font-variant-numeric:tabular-nums}
+.row .fl{color:var(--ember);font-size:.78em;min-width:4em;text-align:right}
+.row.neg .sc{color:var(--blood);text-shadow:0 0 8px var(--blood)}
+.taps{display:flex;flex-direction:column;gap:7px;margin-top:8px}
+.tap{display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px}
+.tap .lbl{min-width:2.2em;color:var(--bone)}
+.tap .bar{flex:1;height:13px;background:var(--screen);border:1px solid #000;border-radius:3px;overflow:hidden;box-shadow:inset 0 0 5px #000}
+.tap .fill{height:100%;width:0;background:linear-gradient(90deg,var(--ember),var(--gold));box-shadow:0 0 8px var(--ember);transition:width .12s linear}
+.tap .n{min-width:2ch;text-align:right;color:var(--gold);font-variant-numeric:tabular-nums}
+.tap.out{opacity:.35}.tap.out .fill{background:var(--ash);box-shadow:none}
+.timebar{height:7px;margin-top:8px;background:var(--screen);border:1px solid #000;border-radius:3px;overflow:hidden}
+.timebar .tf{height:100%;background:var(--blood);box-shadow:0 0 8px var(--blood);width:100%;transition:width .12s linear}
+.win-name{font-size:clamp(26px,9vw,46px);font-weight:800;color:var(--gold);text-shadow:0 0 18px var(--gold);letter-spacing:.03em}
+.win-sub{font-size:clamp(14px,4.6vw,20px);color:var(--bone);margin-top:6px;letter-spacing:.07em}
+.combo .win-name{color:var(--toxic);text-shadow:0 0 22px var(--toxic)}
+
+.hud{margin-top:12px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.plate{background:linear-gradient(180deg,var(--panel-hi),var(--panel-lo));border:1px solid #000;border-radius:8px;padding:7px 4px 6px;text-align:center;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05),inset 0 -3px 6px rgba(0,0,0,.6)}
+.plate .pl{font-size:11px;letter-spacing:.12em;color:var(--ash);font-weight:700}
+.plate .val{font-size:clamp(20px,7vw,28px);font-weight:800;color:var(--gold);text-shadow:0 0 10px var(--gold);line-height:1.1;font-variant-numeric:tabular-nums}
+.plate.neg .val{color:var(--blood);text-shadow:0 0 10px var(--blood)}
+.plate .streak{height:10px;font-size:10px;color:var(--ember)}
+.plate.held{box-shadow:0 0 14px var(--toxic),inset 0 0 0 1px var(--toxic)}
+.plate.win{animation:platewin .5s ease 4 alternate}
+@keyframes platewin{from{box-shadow:inset 0 0 0 1px #000}to{box-shadow:0 0 18px var(--gold),inset 0 0 0 1px var(--gold)}}
+
+.statusbar{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding:6px 10px;border-radius:7px;
+  background:linear-gradient(180deg,var(--panel-hi),var(--panel-lo));border:1px solid #000;
+  font-size:11px;letter-spacing:.08em;color:var(--ash);font-weight:700;text-transform:uppercase}
+.statusbar .mode{color:var(--ember);text-shadow:0 0 8px var(--ember)}
+.gear{appearance:none;border:1px solid var(--panel-hi);background:var(--panel);color:var(--ash);
+  border-radius:6px;padding:4px 9px;font:inherit;font-size:11px;font-weight:700;letter-spacing:.08em;cursor:pointer;text-transform:uppercase}
+.gear.open{color:var(--ember);border-color:var(--ember)}
+
+.settings{margin-top:10px;display:none;flex-direction:column;gap:9px;padding:10px;border-radius:8px;
+  background:linear-gradient(180deg,var(--panel),var(--panel-lo));border:1px solid #000;box-shadow:inset 0 0 10px rgba(0,0,0,.6)}
+.settings.show{display:flex}
+.srow{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.slbl{font-size:11px;letter-spacing:.1em;color:var(--ash);font-weight:700;text-transform:uppercase;min-width:5.5em}
+.seg{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;flex:1}
+.opt{appearance:none;border:1px solid var(--panel-hi);background:var(--panel);color:var(--bone);
+  border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;font-weight:700;letter-spacing:.04em;cursor:pointer;transition:.12s}
+.opt:active{transform:translateY(1px)}
+.opt.active{background:var(--ember);color:#0a0604;border-color:var(--ember);box-shadow:0 0 10px var(--ember)}
+
+.help{width:min(440px,96vw);color:var(--ash);font-size:11px;line-height:1.55;text-align:center;padding:0 6px}
+.board{width:min(440px,96vw);background:linear-gradient(180deg,var(--panel),var(--panel-lo));border:2px solid #000;border-radius:14px;padding:12px 14px;
+  box-shadow:0 0 0 3px #000,inset 0 -3px 8px rgba(0,0,0,.5)}
+.board h3{margin:0 0 8px;font-size:13px;letter-spacing:.16em;color:var(--ember);text-shadow:0 0 8px var(--ember);text-transform:uppercase;font-weight:800}
+.board table{width:100%;border-collapse:collapse;font-size:13px}
+.board th{font-size:10px;letter-spacing:.08em;color:var(--ash);text-transform:uppercase;text-align:right;padding:2px 4px;font-weight:700}
+.board th:first-child,.board td:first-child{text-align:left}
+.board td{padding:5px 4px;border-top:1px solid var(--panel-hi);font-weight:700;font-variant-numeric:tabular-nums}
+.board .rk{color:var(--ash);width:1.6em}.board .pn{color:var(--bone)}
+.board .ps{color:var(--gold);text-shadow:0 0 6px var(--gold)}.board .ps.neg{color:var(--blood);text-shadow:0 0 6px var(--blood)}
+.board .mss{color:var(--toxic);text-shadow:0 0 6px var(--toxic)}
+.board tr.lead td{background:rgba(243,177,58,.08)}
+@media (prefers-reduced-motion:reduce){.crt::after{animation:none}.crt.shake{animation:none}
+  .flash.fire{animation:flash .25s ease-out}.plate.win{animation:none;box-shadow:0 0 14px var(--gold)}}
+</style>
+
+<div class="cabinet" id="cab">
+  <div class="brand"><span><span class="logo">▮▮</span> REFLEX</span><span class="tag">DEMO</span></div>
+  <div class="crt-bezel"><div class="crt" id="crt"><div class="flash" id="flash"></div><div class="crt-inner" id="screen"></div></div></div>
+  <div class="hud" id="hud"></div>
+  <div class="statusbar"><span><span id="modeLbl">MODE</span>:&nbsp;<span class="mode" id="modeName">—</span></span>
+    <button class="gear" id="gear">⚙ <span id="setLbl">SETTINGS</span></button></div>
+  <div class="settings" id="settings"></div>
+</div>
+<div class="help" id="help"></div>
+<div class="board" id="board"></div>
+
+<script>
+"use strict";
+const N=4, ROUNDS=2;
+
+/* ============================== ЛОКАЛИЗАЦИЯ ============================== */
+const I18N={
+ ru:{modeSpeed:"КТО БЫСТРЕЕ",modeTaps:"КТО БОЛЬШЕ",registration:"РЕГИСТРАЦИЯ",start:"СТАРТ",release:"ОТПУСТИТЕ КНОПКИ",round:"РАУНД",getReady:"ПРИГОТОВЬТЕСЬ...",pressGo:"ЖМИ!",tapGo:"ТАПАЙ!",draw:"НИЧЬЯ",noPress:"НЕТ НАЖАТИЙ",noTaps:"НЕТ ТАПОВ",ms:"МС",tapsU:"ТАПОВ",comboPts:"+3 БАЛЛА",streak:"серия",holdStart:"ЗАЖМИ КНОПКИ 3 С = СТАРТ",modeLbl:"РЕЖИМ",settings:"НАСТРОЙКИ",language:"ЯЗЫК",sound:"ЗВУК",theme:"ТЕМА",soundSet:"ЗВУК. ТЕМА",gameMode:"РЕЖИМ ИГРЫ",leaders:"ЛИДЕРЫ",scoreCol:"ОЧКИ",on:"ВКЛ",off:"ВЫКЛ",grayName:"СЕРЫЙ",dash:"—",help:"Табло-рейтинг. Ввода с экрана нет: играют физическими кнопками. Идёт демо-прогон."},
+ en:{modeSpeed:"WHO'S FASTER",modeTaps:"MOST TAPS",registration:"REGISTER",start:"START",release:"RELEASE BUTTONS",round:"ROUND",getReady:"GET READY...",pressGo:"PRESS!",tapGo:"TAP!",draw:"DRAW",noPress:"NO PRESSES",noTaps:"NO TAPS",ms:"MS",tapsU:"TAPS",comboPts:"+3 POINTS",streak:"streak",holdStart:"HOLD BUTTONS 3 S = START",modeLbl:"MODE",settings:"SETTINGS",language:"LANGUAGE",sound:"SOUND",theme:"THEME",soundSet:"SOUND SET",gameMode:"GAME MODE",leaders:"LEADERS",scoreCol:"SCORE",on:"ON",off:"OFF",grayName:"GRAY",dash:"—",help:"Live scoreboard. No on-screen input: players use physical buttons. Demo playback running."},
+ de:{modeSpeed:"WER IST SCHNELLER",modeTaps:"WER MEHR",registration:"ANMELDUNG",start:"START",release:"TASTEN LOSLASSEN",round:"RUNDE",getReady:"BEREITHALTEN...",pressGo:"DRÜCK!",tapGo:"TIPPEN!",draw:"UNENTSCHIEDEN",noPress:"KEINE EINGABE",noTaps:"KEINE TIPPS",ms:"MS",tapsU:"TIPPS",comboPts:"+3 PUNKTE",streak:"serie",holdStart:"TASTEN 3 S HALTEN = START",modeLbl:"MODUS",settings:"EINSTELLUNGEN",language:"SPRACHE",sound:"TON",theme:"DESIGN",soundSet:"SOUND-SET",gameMode:"SPIELMODUS",leaders:"BESTENLISTE",scoreCol:"PUNKTE",on:"AN",off:"AUS",grayName:"GRAU",dash:"—",help:"Live-Anzeigetafel. Keine Eingabe am Bildschirm: gespielt wird mit echten Tasten. Demo läuft."},
+ uk:{modeSpeed:"ХТО ШВИДШЕ",modeTaps:"ХТО БІЛЬШЕ",registration:"РЕЄСТРАЦІЯ",start:"СТАРТ",release:"ВІДПУСТІТЬ КНОПКИ",round:"РАУНД",getReady:"ПРИГОТУЙТЕСЯ...",pressGo:"ТИСНИ!",tapGo:"ТАПАЙ!",draw:"НІЧИЯ",noPress:"НЕМАЄ НАТИСКАНЬ",noTaps:"НЕМАЄ ТАПІВ",ms:"МС",tapsU:"ТАПІВ",comboPts:"+3 БАЛИ",streak:"серія",holdStart:"ТРИМАЙ КНОПКИ 3 С = СТАРТ",modeLbl:"РЕЖИМ",settings:"НАЛАШТУВАННЯ",language:"МОВА",sound:"ЗВУК",theme:"ТЕМА",soundSet:"ЗВУК. ТЕМА",gameMode:"РЕЖИМ ГРИ",leaders:"ЛІДЕРИ",scoreCol:"ОЧКИ",on:"УВІМК",off:"ВИМК",grayName:"СІРИЙ",dash:"—",help:"Табло-рейтинг. Вводу з екрана немає: грають фізичними кнопками. Іде демо."},
+};
+function t(k){return (I18N[SETTINGS.lang]||I18N.en)[k];}
+
+/* ============================== НАСТРОЙКИ =============================== */
+/* На железе хранятся в NVM ESP и приходят/уходят по WebSocket.
+   В этом превью — в памяти вкладки (в песочнице нет постоянного хранилища). */
+const SETTINGS={ lang:"ru", sound:true, theme:"doom", soundset:"doom" };
+
+/* ============================== СОСТОЯНИЕ ============================== */
+const STATE={scene:"idle",mode:0,score:[[0,0,0,0],[0,0,0,0]],streak:[[0,0,0,0],[0,0,0,0]],
+  held:[false,false,false,false],isPlayer:[false,false,false,false],taps:[0,0,0,0],excluded:[false,false,false,false],
+  round:0,countdown:3,winnerMask:0,reactionMs:0,bestTaps:0,best:[0,0,0,0],msg1:"",msg2:""};
+function modeName(m){return m===0?t('modeSpeed'):t('modeTaps');}
+
+/* ============================== ЗВУКОВЫЕ ТЕМЫ ========================== */
+let AC=null,audioOn=false;
+function audio(){if(!AC){try{AC=new(window.AudioContext||window.webkitAudioContext)()}catch(e){}}return AC;}
+function note(f,s,d,type,g){const ac=audio();if(!ac)return;
+  const o=ac.createOscillator(),gn=ac.createGain();o.type=type||"square";o.frequency.value=f;o.connect(gn);gn.connect(ac.destination);
+  const x=ac.currentTime+s;gn.gain.setValueAtTime(0,x);gn.gain.linearRampToValueAtTime(g||.06,x+.008);
+  gn.gain.exponentialRampToValueAtTime(.0008,x+d);o.start(x);o.stop(x+d+.02);}
+const SOUNDSETS={
+ doom:{wave:"square",boot:[[165,120],[165,120],[330,120],[165,120],[147,120],[165,120],[196,260]],arm:[[880,50]],series:[[523,90],[659,90],[784,150]],go:[[1568,160]],false:[[400,120],[300,150],[200,220]],win:[[784,100],[988,100],[1319,200]],combo:[[523,80],[659,80],[784,80],[1047,180],[784,80],[1047,280]],mode:[[660,70],[990,90]]},
+ arcade:{wave:"square",boot:[[523,80],[659,80],[784,80],[1047,150]],arm:[[1318,40]],series:[[784,80],[1047,80],[1318,150]],go:[[2093,140]],false:[[523,100],[392,120],[262,180]],win:[[1047,90],[1318,90],[1568,90],[2093,200]],combo:[[1047,70],[1318,70],[1568,70],[2093,160],[1568,70],[2093,260]],mode:[[880,60],[1318,90]]},
+ beeper:{wave:"square",boot:[[1000,60],[0,40],[1000,60]],arm:[[1200,30]],series:[[800,60],[1000,60],[1200,120]],go:[[1800,120]],false:[[600,80],[400,140]],win:[[1000,70],[1400,70],[1800,160]],combo:[[1400,60],[1800,60],[1400,60],[1800,220]],mode:[[1000,50],[1400,70]]},
+ chip:{wave:"triangle",boot:[[330,120],[392,120],[494,120],[659,200]],arm:[[988,40]],series:[[587,90],[740,90],[988,150]],go:[[1318,150]],false:[[494,110],[392,130],[294,200]],win:[[784,90],[988,90],[1175,90],[1568,200]],combo:[[988,70],[1175,70],[1318,70],[1760,180],[1318,70],[1760,260]],mode:[[740,60],[1109,90]]},
+};
+function snd(ev){ if(!SETTINGS.sound||!audioOn)return; const set=SOUNDSETS[SETTINGS.soundset]||SOUNDSETS.doom;
+  const arr=set[ev]; if(!arr)return; let tt=0; for(const[f,d]of arr){ if(f>0)note(f,tt,d/1000,set.wave); tt+=d/1000; } }
+
+/* ============================== ОТРИСОВКА ============================= */
+const screen=document.getElementById("screen"),crt=document.getElementById("crt"),flash=document.getElementById("flash");
+const hud=document.getElementById("hud"),modeNameEl=document.getElementById("modeName");
+function esc(s){return String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
+function render(){
+  modeNameEl.textContent=modeName(STATE.mode);
+  hud.innerHTML="";
+  for(let i=0;i<N;i++){const sc=STATE.score[STATE.mode][i],st=STATE.streak[STATE.mode][i];
+    const d=document.createElement("div");
+    d.className="plate"+(sc<0?" neg":"")+(STATE.held[i]?" held":"")+((STATE.scene==="result"||STATE.scene==="combo")&&(STATE.winnerMask&(1<<i))?" win":"");
+    d.innerHTML=`<div class="pl">P${i+1}</div><div class="val">${sc}</div><div class="streak">${st>=2?("🔥"+st):""}</div>`;
+    hud.appendChild(d);}
+  let h="";
+  switch(STATE.scene){
+    case "idle":h=`<div class="title">${modeName(STATE.mode)}</div><div class="rate">`;
+      for(let i=0;i<N;i++){const sc=STATE.score[STATE.mode][i],st=STATE.streak[STATE.mode][i];
+        h+=`<div class="row${sc<0?" neg":""}"><span class="p">P${i+1}</span><span class="sc">${sc}</span><span class="fl">${st>=2?(t('streak')+" "+st):""}</span></div>`;}
+      h+=`</div><div class="hint">${t('holdStart')}</div>`;break;
+    case "reg":h=`<div class="title">${t('registration')}</div><div class="regdots">`;
+      for(let i=0;i<N;i++)h+=`<div class="regdot${STATE.held[i]?" on":""}">${i+1}</div>`;
+      h+=`</div><div class="count">${Math.max(0,STATE.countdown)}</div>`;break;
+    case "series":h=`<div class="huge" style="font-size:clamp(28px,10vw,56px)">${t('start')}</div><div class="sub">${t('release')}</div>`;break;
+    case "wait":h=`<div class="sub">${t('round')} ${STATE.round+1}/${ROUNDS} · ${modeName(STATE.mode)}</div><div class="title" style="margin-top:10px">${t('getReady')}</div>`;break;
+    case "goA":h=`<div class="huge">${t('pressGo')}</div>`;break;
+    case "goB":{h=`<div class="title">${t('tapGo')}</div><div class="taps">`;const mx=Math.max(1,...STATE.taps);
+      for(let i=0;i<N;i++){if(!STATE.isPlayer[i])continue;const out=STATE.excluded[i];
+        h+=`<div class="tap${out?" out":""}"><span class="lbl">P${i+1}</span><span class="bar"><span class="fill" style="width:${out?0:(STATE.taps[i]/mx*100)}%"></span></span><span class="n">${out?"✗":STATE.taps[i]}</span></div>`;}
+      h+=`</div><div class="timebar"><div class="tf" style="width:${Math.round(tfLeft*100)}%"></div></div>`;}break;
+    case "result":case "combo":{const win=[];for(let i=0;i<N;i++)if(STATE.winnerMask&(1<<i))win.push("P"+(i+1));
+      const isC=STATE.scene==="combo";let name,sub;
+      if(STATE.winnerMask===0){name="—";sub=(STATE.mode===0?t('noPress'):t('noTaps'));}
+      else if(win.length>1){name=t('draw');sub=win.join(" ")+"  +1";}
+      else{name=win[0];sub=(STATE.mode===0?(STATE.reactionMs+" "+t('ms')):(STATE.bestTaps+" "+t('tapsU')));}
+      if(isC){name="COMBO ×"+STATE.msg1;sub=t('comboPts');}
+      h=`<div class="${isC?"combo":""}"><div class="win-name">${esc(name)}</div><div class="win-sub">${esc(sub)}</div></div>`;}break;
+  }
+  screen.innerHTML=h;
+  renderLeaders();
+}
+const boardEl=document.getElementById("board");
+function renderLeaders(){
+  const m=STATE.mode;
+  const rows=[];
+  for(let i=0;i<N;i++) rows.push({i,score:STATE.score[m][i],best:STATE.best[i]});
+  rows.sort((a,b)=> b.score-a.score || ((a.best||1e9)-(b.best||1e9)) || a.i-b.i);
+  let h=`<h3>${t('leaders')} · ${modeName(m)}</h3><table><tr><th>#</th><th>P</th><th>${t('scoreCol')}</th><th>${t('ms')}</th></tr>`;
+  rows.forEach((r,rank)=>{
+    const msTxt = (m===0 && r.best) ? r.best : t('dash');
+    h+=`<tr class="${rank===0?'lead':''}"><td class="rk">${rank+1}</td><td class="pn">P${r.i+1}</td>`
+      +`<td class="ps${r.score<0?' neg':''}">${r.score}</td><td class="mss">${msTxt}</td></tr>`;
+  });
+  boardEl.innerHTML=h+`</table>`;
+}
+function fireFlash(shake){flash.classList.remove("fire");void flash.offsetWidth;flash.classList.add("fire");
+  if(shake){crt.classList.remove("shake");void crt.offsetWidth;crt.classList.add("shake");}}
+
+/* ===================== ПАНЕЛЬ НАСТРОЕК (вся локализуется) ============== */
+const gear=document.getElementById("gear"),settingsEl=document.getElementById("settings");
+const helpEl=document.getElementById("help"),modeLblEl=document.getElementById("modeLbl"),setLblEl=document.getElementById("setLbl");
+function curVal(key){ return key==='gmode'?String(STATE.mode):String(SETTINGS[key]); }
+function seg(label,key,opts){let s=`<div class="srow"><span class="slbl">${label}</span><span class="seg">`;
+  for(const[v,txt]of opts){const a=curVal(key)===String(v)?" active":"";s+=`<button class="opt${a}" data-k="${key}" data-v="${v}">${txt}</button>`;}
+  return s+`</span></div>`;}
+function buildSettings(){
+  settingsEl.innerHTML=
+    seg(t('gameMode'),'gmode',[['0',t('modeSpeed')],['1',t('modeTaps')]])+
+    seg(t('language'),'lang',[['ru','RU'],['en','EN'],['de','DE'],['uk','UA']])+
+    seg(t('sound'),'sound',[['true',t('on')],['false',t('off')]])+
+    seg(t('theme'),'theme',[['doom','DOOM'],['fallout','FALLOUT'],['gray',t('grayName')],['amber','AMBER'],['neon','NEON']])+
+    seg(t('soundSet'),'soundset',[['doom','DOOM'],['arcade','ARCADE'],['beeper','BEEP'],['chip','CHIP']]);
+}
+function applyLang(){ modeLblEl.textContent=t('modeLbl'); setLblEl.textContent=t('settings'); helpEl.textContent=t('help'); buildSettings(); render(); }
+function applyTheme(){ document.body.dataset.theme=SETTINGS.theme; }
+settingsEl.addEventListener("click",e=>{const b=e.target.closest(".opt");if(!b)return;
+  const k=b.dataset.k,v=b.dataset.v;
+  if(k==="gmode"){ const m=+v; if(live)sendSetting("mode",m); else STATE.mode=m; buildSettings(); render(); return; }
+  if(k==="sound"){SETTINGS.sound=(v==="true"); if(SETTINGS.sound&&AC&&AC.resume)AC.resume();}
+  else SETTINGS[k]=v;
+  if(k==="theme")applyTheme();
+  if(k==="lang")applyLang();
+  sendSetting(k, k==="sound"?(v==="true"?1:0):v);
+  buildSettings(); render();
+});
+gear.addEventListener("click",()=>{settingsEl.classList.toggle("show");gear.classList.toggle("open");});
+
+/* ===================== САМОПРОГОН (на железе = WebSocket) ============== */
+let tEnter=0,sceneDur=0,tfLeft=1,parts=[],tapTarget=[0,0,0,0],comboQueued=false;
+function rnd(a,b){return a+Math.floor(Math.random()*(b-a+1));}
+function pick(){const all=[0,1,2,3],n=rnd(2,4);parts=[];while(parts.length<n)parts.push(all.splice(rnd(0,all.length-1),1)[0]);parts.sort();}
+function setHeld(v){for(let i=0;i<N;i++)STATE.held[i]=v&&parts.includes(i);}
+function enter(s,dur){STATE.scene=s;tEnter=performance.now();sceneDur=dur;}
+function applyWin(p){STATE.score[STATE.mode][p]+=1;STATE.streak[STATE.mode][p]+=1;
+  if(STATE.streak[STATE.mode][p]%3===0){STATE.score[STATE.mode][p]+=3;comboQueued=true;STATE.msg1=String(STATE.streak[STATE.mode][p]);STATE.winnerMask|=(1<<p);}}
+function breakStreaks(keep){for(const i of parts)if(!(keep&(1<<i)))STATE.streak[STATE.mode][i]=0;}
+function startSeries(){STATE.round=0;for(let i=0;i<N;i++)STATE.isPlayer[i]=parts.includes(i);snd('series');enter("series",1300);}
+function newRound(){for(let i=0;i<N;i++){STATE.taps[i]=0;STATE.excluded[i]=false;}STATE.winnerMask=0;comboQueued=false;tfLeft=1;setHeld(false);enter("wait",rnd(1500,3200));}
+function fireGo(){if(STATE.mode===0){enter("goA",rnd(800,1200));snd('go');fireFlash(true);
+    const w=parts[rnd(0,parts.length-1)];STATE.winnerMask=(1<<w);STATE.reactionMs=rnd(130,430);}
+  else{enter("goB",rnd(2600,4500));snd('go');fireFlash(true);
+    for(const i of parts)tapTarget[i]=rnd(7,22);if(Math.random()<.15&&parts.length>=2)tapTarget[parts[1]]=tapTarget[parts[0]];}}
+function finishRound(){
+  if(STATE.mode===0){const w=Math.log2(STATE.winnerMask)|0;STATE.msg2=STATE.reactionMs+" "+t('ms');if(!STATE.best[w]||STATE.reactionMs<STATE.best[w])STATE.best[w]=STATE.reactionMs;applyWin(w);breakStreaks(STATE.winnerMask);snd('win');}
+  else{let best=0;for(const i of parts)best=Math.max(best,STATE.taps[i]);STATE.bestTaps=best;let mask=0,cnt=0;
+    for(const i of parts)if(STATE.taps[i]===best){mask|=(1<<i);cnt++;}
+    STATE.winnerMask=mask;STATE.msg2=(cnt>1?"":best+" "+t('tapsU'));for(const i of parts)if(mask&(1<<i))applyWin(i);breakStreaks(mask);snd('win');}
+  enter("result",3000);
+}
+function step(now){const el=now-tEnter;
+  switch(STATE.scene){
+    case "idle":if(el>=sceneDur){pick();setHeld(true);snd('arm');enter("reg",3000);}break;
+    case "reg":STATE.countdown=Math.ceil((3000-el)/1000);if(el>=sceneDur)startSeries();break;
+    case "series":if(el>=sceneDur){setHeld(false);newRound();}break;
+    case "wait":if(el>=sceneDur)fireGo();break;
+    case "goA":if(el>=sceneDur)finishRound();break;
+    case "goB":tfLeft=Math.max(0,1-el/sceneDur);
+      for(const i of parts){const tg=Math.round(tapTarget[i]*(el/sceneDur));if(STATE.taps[i]<tg)STATE.taps[i]=tg;}
+      if(el>=sceneDur){for(const i of parts)STATE.taps[i]=tapTarget[i];finishRound();}break;
+    case "result":
+      if(comboQueued&&el>1400){comboQueued=false;snd('combo');enter("combo",2600);fireFlash(true);break;}
+      if(el>=sceneDur)nextAfterRound();break;
+    case "combo":if(el>=sceneDur)nextAfterRound();break;
+  }
+}
+function nextAfterRound(){STATE.round++;if(STATE.round<ROUNDS)newRound();
+  else{if(Math.random()<.5){STATE.mode=(STATE.mode+1)%2;snd('mode');}comboQueued=false;enter("idle",2600);}}
+
+/* ============================== ЗАПУСК ================================= */
+addEventListener("pointerdown",function once(){audioOn=true;if(audio()){AC.resume&&AC.resume();snd('boot');}},{once:true});
+
+/* --- LIVE-режим: связь с ESP8266 по WebSocket (ESP -> телефон) ---------- */
+let live=false, ws=null, prevScene="";
+function applyLive(d){
+  STATE.scene=d.scene; STATE.mode=d.mode; STATE.round=d.round; STATE.countdown=d.countdown;
+  STATE.winnerMask=d.winnerMask; STATE.reactionMs=d.reactionMs; STATE.bestTaps=d.bestTaps;
+  if(d.best) for(let i=0;i<N;i++) STATE.best[i]=d.best[i];
+  for(let i=0;i<N;i++){ STATE.held[i]=!!d.held[i]; STATE.isPlayer[i]=!!d.isPlayer[i];
+    STATE.taps[i]=d.taps[i]; STATE.excluded[i]=!!d.excluded[i];
+    STATE.score[0][i]=d.score0[i]; STATE.score[1][i]=d.score1[i];
+    STATE.streak[0][i]=d.streak0[i]; STATE.streak[1][i]=d.streak1[i]; }
+  // настройки приходят из NVM ESP
+  const L=["ru","en","de","uk"], T=["doom","fallout","gray","amber","neon"], S=["doom","arcade","beeper","chip"];
+  if(d.lang!=null&&L[d.lang]&&L[d.lang]!==SETTINGS.lang){SETTINGS.lang=L[d.lang];applyLang();}
+  if(d.theme!=null&&T[d.theme]&&T[d.theme]!==SETTINGS.theme){SETTINGS.theme=T[d.theme];applyTheme();buildSettings();}
+  if(d.sound!=null)SETTINGS.sound=!!d.sound;
+  if(d.soundset!=null&&S[d.soundset])SETTINGS.soundset=S[d.soundset];
+  // звуки событий на динамике телефона (пьезо звучит на самом устройстве)
+  if(d.scene!==prevScene){
+    if(d.scene==="goA"||d.scene==="goB"){snd('go');fireFlash(true);}
+    else if(d.scene==="series")snd('series');
+    else if(d.scene==="reg")snd('arm');
+    else if(d.scene==="combo"){snd('combo');fireFlash(true);}
+    else if(d.scene==="result"&&d.winnerMask)snd('win');
+    prevScene=d.scene;
+  }
+  render();
+}
+function sendSetting(k,v){ if(live&&ws&&ws.readyState===1) ws.send(JSON.stringify({set:k,val:v})); }
+(function connect(){
+  try{ ws=new WebSocket("ws://"+location.hostname+":81/"); }catch(e){ return; }
+  ws.onopen=()=>{ live=true; const tg=document.querySelector(".tag"); if(tg)tg.textContent="LIVE"; };
+  ws.onmessage=(e)=>{ try{applyLive(JSON.parse(e.data));}catch(_){} };
+  ws.onclose=()=>{ live=false; };
+})();
+
+let last=0;
+function loop(now){ if(!live)step(now); if(now-last>33){render();last=now;} requestAnimationFrame(loop); }
+applyTheme();applyLang();enter("idle",2600);render();requestAnimationFrame(loop);
+</script>

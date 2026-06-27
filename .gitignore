@@ -1,0 +1,20 @@
+# Arduino / build
+*.bin
+*.elf
+*.hex
+*.map
+build/
+.build/
+*.o
+*.a
+
+# Arduino IDE
+*.tmp
+.theia/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
