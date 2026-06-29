@@ -1,43 +1,59 @@
 /* =============================================================================
- *  Reflex — игра на реакцию (Wemos D1 Mini / ESP8266MOD), Arduino IDE
- *  Версия:    v0.3.1  (рефакторинг: Timer1-звук, новый GPIO, WebSockets, LittleFS)
+ *  Reflex — игра на реакцию (Wemos D1 Mini / ESP8266), Arduino IDE
+ *  Версия:    v0.5.0  (вариант LITE — шаг 1: Wi-Fi-меню + OLED + веб-табло)
+ *  Вариант:   LITE  (без TFT/джойстика; управление и табло — в вебе)
  *
- *  Дисплей:   нет (табло = телефон). Сигнал старта даёт пищалка.
- *  Звук:      пассивный пьезо на GPIO15; генерация на аппаратном Timer1
- *             (чистый меандр, неблокирующий автомат, нечувствителен к Wi-Fi).
+ *  Что нового против v0.3.x:
+ *    - Сервисная кнопка УБРАНА: смена режима/звука/сброс — через веб-страницу.
+ *    - Wi-Fi-меню: при старте пытаемся войти в сохранённую сеть; если её нет —
+ *      поднимается настроечная точка "Reflex-Setup" с выбором сети и паролем
+ *      (библиотека WiFiManager). Если подключиться не удалось — откат в свою
+ *      точку "Reflex", и игра работает локально.
+ *    - OLED 0.91" (SSD1306 128x32, I2C): показывает IP/режим и поздравляет
+ *      победителя (кириллица через U8g2).
+ *    - Метка варианта/версии (FW_VARIANT/FW_VERSION) — основа для будущего OTA.
  *
- *  Библиотеки (Менеджер библиотек — оба ставятся в один клик):
- *    - WebSockets   by Markus Sattler (Links2004/arduinoWebSockets)
- *    - ESP8266WebServer, LittleFS, Ticker, ESP8266WiFi — в ядре ESP8266
+ *  Шаги впереди (отдельными версиями):
+ *    - v0.5.1: OTA — загрузка прошивки через веб + ArduinoOTA.
+ *    - v0.5.2: самозагрузка с GitHub (манифест version.json, MD5, уведомление).
  *
- *  Связь: телефон -> Wi-Fi "Reflex" -> http://192.168.4.1 (страница из gzip),
- *         состояние и события идут по WebSocket (порт 81), ESP <-> телефон.
+ *  Библиотеки (Менеджер библиотек Arduino IDE):
+ *    - WiFiManager        by tzapu
+ *    - U8g2               by oliver (kraus)
+ *    - WebSockets         by Markus Sattler (Links2004/arduinoWebSockets)
+ *    - ESP8266WiFi, ESP8266WebServer, LittleFS — в ядре ESP8266
  *
- *  ----------------------------- РАСПИНОВКА ---------------------------------
+ *  ----------------------------- РАСПИНОВКА (LITE) --------------------------
  *    P1 = D1/GPIO5   P2 = D2/GPIO4   P3 = D5/GPIO14   P4 = D6/GPIO12
- *    Сервисная = D7/GPIO13           Пищалка = D8/GPIO15
- *    Кнопки игроков НЕ на GPIO0/2/15 -> безопасная загрузка.
+ *    Пищалка = D8/GPIO15
+ *    OLED:  SDA = D7/GPIO13   SCL = D4/GPIO2   VCC = 3V3   GND = G
+ *    Свободны: D3/GPIO0, D0/GPIO16. Кнопки НЕ на GPIO0/2/15 -> загрузка цела.
  * ===========================================================================*/
+
+/* --- вариант сборки: для будущей TFT-версии определишь VARIANT_TFT --------- */
+#define VARIANT_LITE
+#define FW_VERSION "0.5.0"
+#define FW_VARIANT "lite"
 
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
+#include <WiFiManager.h>
 #include <ESP8266WebServer.h>
 #include <WebSocketsServer.h>
 #include <LittleFS.h>
+#include <U8g2lib.h>
 #include "index_html_gz.h"
 
 /* ----------------------------- ПИНЫ --------------------------------------- */
 #define PIN_BUZZER 15
-#define PIN_SERVICE 13
+#define OLED_SDA 13
+#define OLED_SCL 2
 static const uint8_t BTN_PIN[4] = {5, 4, 14, 12};   // P1..P4
 
 /* --------------------------- ТАЙМИНГИ ------------------------------------- */
 #define DEBOUNCE_MS 12
 #define ROUNDS_PER_SERIES 2
 #define REG_HOLD_MS 3000
-#define SVC_RESET_MS 3000
-#define SVC_MUTE_MS 6000
-#define SVC_SHORT_MS 1000
 #define RESULT_SHOW_MS 3500
 #define ACTIVE_TIMEOUT_MS 10000
 #define PAUSE_MIN_MS 1000
@@ -45,13 +61,18 @@ static const uint8_t BTN_PIN[4] = {5, 4, 14, 12};   // P1..P4
 #define TAPWIN_MIN_MS 2000
 #define TAPWIN_MAX_MS 10000
 #define BROADCAST_MS 100
+#define OLED_TICK_MS 1000
 
-const char* AP_SSID = "Reflex";
-const char* AP_PASS = "";       // открытая сеть; для пароля задай 8+ символов
+const char* AP_SSID   = "Reflex";          // имя своей точки (офлайн-режим)
+const char* SETUP_AP  = "Reflex-Setup";    // имя настроечной точки WiFiManager
+const char* AP_IP     = "192.168.4.1";     // адрес точки (и портала, и офлайн-режима)
+bool apMode = false;                        // true = работаем своей точкой
 
-/* --------------------------- СЕРВЕР --------------------------------------- */
+/* --------------------------- СЕРВЕР / ДИСПЛЕЙ ---------------------------- */
 ESP8266WebServer http(80);
 WebSocketsServer ws(81);
+/* Программный I2C: SCL=GPIO2, SDA=GPIO13 — любые пины, без путаницы с Wire */
+U8G2_SSD1306_128X32_UNIVISION_F_SW_I2C oled(U8G2_R0, OLED_SCL, OLED_SDA, U8X8_PIN_NONE);
 
 /* --------------------------- РЕЖИМЫ / СОСТОЯНИЯ --------------------------- */
 enum Mode { MODE_SPEED = 0, MODE_TAPS = 1, MODE_COUNT };
@@ -59,10 +80,9 @@ enum State { ST_IDLE, ST_REGISTERING, ST_SERIES_START, ST_ROUND_WAIT,
              ST_ROUND_ACTIVE, ST_ROUND_RESULT, ST_MSG };
 State state = ST_IDLE;
 
-/* Типы объявляем заранее: Arduino IDE генерирует прототипы функций в начале
- * файла, поэтому структуры-параметры должны быть видны раньше первой функции. */
+/* Типы объявляем заранее (Arduino IDE генерирует прототипы в начале файла). */
 struct Btn { uint8_t pin; bool stable, lastRead; uint32_t lastChange; bool pressedEdge, releasedEdge; };
-Btn players[4], service;
+Btn players[4];
 struct Note { uint16_t f, d; };
 struct Mel  { const Note* n; uint8_t len; };
 
@@ -72,7 +92,7 @@ struct Mel  { const Note* n; uint8_t len; };
 struct GameData {
   uint16_t magic;
   int16_t  score[MODE_COUNT][4];
-  uint16_t bestMs[4];          // лучшая реакция (режим скорости), NO_MS = нет
+  uint16_t bestMs[4];
   uint8_t  mode, sound, soundset, lang, theme;
 };
 GameData data;
@@ -99,33 +119,29 @@ int8_t   winnerA = -1;
 uint8_t  winnerMask = 0;
 uint32_t reactionUs = 0;
 bool     comboShown = false;
-uint32_t svcDownAt = 0; bool svcPlayerTouched = false, svcMuteDone = false;
 uint32_t lastBroadcast = 0;
 bool     dirty = true;
 
 /* ===========================================================================
  *                  ЗВУК: аппаратный Timer1, чистый меандр
- *  Timer1 тикает на 5 МГц (DIV16). На частоте f переключаем вывод каждые
- *  2.5e6/f тиков -> на пине ровный прямоугольник. ISR в IRAM, высокий
- *  приоритет -> сетевая активность Wi-Fi не вызывает джиттер частоты.
  * ===========================================================================*/
-volatile bool     toneActive = false;
-volatile uint8_t  toneLevel  = 0;
+volatile bool    toneActive = false;
+volatile uint8_t toneLevel  = 0;
 
 void IRAM_ATTR onTimer1(){
   if(!toneActive) return;
   toneLevel ^= 1;
-  if(toneLevel) GPOS = (1 << PIN_BUZZER);   // set
-  else          GPOC = (1 << PIN_BUZZER);   // clear
+  if(toneLevel) GPOS = (1 << PIN_BUZZER);
+  else          GPOC = (1 << PIN_BUZZER);
 }
 void toneFreq(uint16_t f){
   if(f == 0){ toneActive=false; GPOC=(1<<PIN_BUZZER); return; }
-  toneActive=false;                          // короткая пауза против гонки с ISR
-  timer1_write(2500000UL / f);               // полупериод в тиках 5 МГц
+  toneActive=false;
+  timer1_write(2500000UL / f);
   toneActive=true;
 }
 
-/* ----- неблокирующий проигрыватель мелодий (конечный автомат) ------------ */
+/* ----- неблокирующий проигрыватель мелодий ------------------------------- */
 enum Ev { EV_BOOT, EV_ARM, EV_SERIES, EV_GO, EV_FALSE, EV_WIN, EV_COMBO, EV_MODE, EV_COUNT };
 
 const Note D_BOOT[]={{165,120},{165,120},{330,120},{165,120},{147,120},{165,120},{196,260}};
@@ -166,7 +182,7 @@ void btnInit(Btn &b, uint8_t pin){ b.pin=pin; pinMode(pin,INPUT_PULLUP); b.stabl
 void btnUpdate(Btn &b){ b.pressedEdge=false; b.releasedEdge=false; bool raw=(digitalRead(b.pin)==LOW); uint32_t now=millis();
   if(raw!=b.lastRead){ b.lastRead=raw; b.lastChange=now; }
   if((now-b.lastChange)>=DEBOUNCE_MS && b.stable!=b.lastRead){ b.stable=b.lastRead; if(b.stable)b.pressedEdge=true; else b.releasedEdge=true; } }
-void updateAllButtons(){ for(uint8_t i=0;i<4;i++) btnUpdate(players[i]); btnUpdate(service); }
+void updateAllButtons(){ for(uint8_t i=0;i<4;i++) btnUpdate(players[i]); }
 bool anyPlayerHeld(){ for(uint8_t i=0;i<4;i++) if(players[i].stable) return true; return false; }
 
 /* ===========================================================================
@@ -181,11 +197,13 @@ int countdownVal(){ if(state!=ST_REGISTERING) return 0; int32_t l=REG_HOLD_MS-(i
 void buildState(char* b, size_t n){
   uint16_t bm[4]; for(uint8_t i=0;i<4;i++) bm[i]=(data.bestMs[i]==NO_MS)?0:data.bestMs[i];
   snprintf(b,n,
-    "{\"scene\":\"%s\",\"mode\":%u,\"round\":%u,\"countdown\":%d,\"winnerMask\":%u,\"reactionMs\":%lu,\"bestTaps\":%u,"
+    "{\"fw\":\"%s\",\"variant\":\"%s\","
+    "\"scene\":\"%s\",\"mode\":%u,\"round\":%u,\"countdown\":%d,\"winnerMask\":%u,\"reactionMs\":%lu,\"bestTaps\":%u,"
     "\"lang\":%u,\"theme\":%u,\"sound\":%u,\"soundset\":%u,"
     "\"held\":[%d,%d,%d,%d],\"isPlayer\":[%d,%d,%d,%d],\"taps\":[%u,%u,%u,%u],\"excluded\":[%d,%d,%d,%d],"
     "\"best\":[%u,%u,%u,%u],"
     "\"score0\":[%d,%d,%d,%d],\"score1\":[%d,%d,%d,%d],\"streak0\":[%u,%u,%u,%u],\"streak1\":[%u,%u,%u,%u]}",
+    FW_VERSION, FW_VARIANT,
     sceneStr(), data.mode, roundIndex, countdownVal(), winnerMask, (unsigned long)(reactionUs/1000), bestTaps,
     data.lang, data.theme, data.sound, data.soundset,
     players[0].stable,players[1].stable,players[2].stable,players[3].stable,
@@ -198,9 +216,12 @@ void buildState(char* b, size_t n){
     streak[1][0],streak[1][1],streak[1][2],streak[1][3]);
 }
 void broadcast(){ if(ws.connectedClients()==0){ dirty=false; lastBroadcast=millis(); return; }
-  char b[760]; buildState(b,sizeof(b)); ws.broadcastTXT(b); dirty=false; lastBroadcast=millis(); }
+  char b[820]; buildState(b,sizeof(b)); ws.broadcastTXT(b); dirty=false; lastBroadcast=millis(); }
 
-/* приём настроек: {"set":"theme","val":"neon"} / {"set":"mode","val":1} */
+/* приём: {"set":"theme","val":"neon"} / {"set":"mode","val":1} / {"set":"reset"} */
+void clearAllScores(){ for(uint8_t m=0;m<MODE_COUNT;m++) for(uint8_t i=0;i<4;i++){ data.score[m][i]=0; streak[m][i]=0; }
+  for(uint8_t i=0;i<4;i++) data.bestMs[i]=NO_MS; }
+
 void onWsMessage(char* json){
   char key[16]={0}, sval[16]={0};
   char* ks=strstr(json,"\"set\""); char* vs=strstr(json,"\"val\"");
@@ -212,11 +233,13 @@ void onWsMessage(char* json){
   else if(!strcmp(key,"soundset")){ const char* n[]={"doom","arcade","beeper","chip"}; for(uint8_t i=0;i<4;i++) if(!strcmp(sval,n[i])) data.soundset=i; }
   else if(!strcmp(key,"lang")){ const char* n[]={"ru","en","de","uk"}; for(uint8_t i=0;i<4;i++) if(!strcmp(sval,n[i])) data.lang=i; }
   else if(!strcmp(key,"theme")){ const char* n[]={"doom","fallout","gray","amber","neon"}; for(uint8_t i=0;i<5;i++) if(!strcmp(sval,n[i])) data.theme=i; }
+  else if(!strcmp(key,"reset")){ clearAllScores(); play(EV_MODE); }
+  else if(!strcmp(key,"wifi")){ if(!strcmp(sval,"reset")){ WiFiManager wm; wm.resetSettings(); delay(200); ESP.restart(); } return; }
   else return;
   saveData(); dirty=true;
 }
 void onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t len){
-  if(type==WStype_CONNECTED){ char b[760]; buildState(b,sizeof(b)); ws.sendTXT(num,b); }
+  if(type==WStype_CONNECTED){ char b[820]; buildState(b,sizeof(b)); ws.sendTXT(num,b); }
   else if(type==WStype_TEXT){ payload[len]=0; onWsMessage((char*)payload); }
 }
 
@@ -247,33 +270,75 @@ void finishRound(){
   saveData(); if(winnerMask) play(EV_WIN); enterState(ST_ROUND_RESULT);
 }
 
-void handleServiceIdle(){
-  if(service.pressedEdge){ svcDownAt=millis(); svcPlayerTouched=false; svcMuteDone=false; }
-  if(service.stable){ uint32_t held=millis()-svcDownAt;
-    for(uint8_t i=0;i<4;i++){ if(players[i].pressedEdge){ svcPlayerTouched=true;
-        if(held>=SVC_RESET_MS){ data.score[data.mode][i]=0; streak[data.mode][i]=0; data.bestMs[i]=NO_MS; saveData(); play(EV_MODE); dirty=true; } } }
-    if(!svcMuteDone && !svcPlayerTouched && held>=SVC_MUTE_MS){ data.sound=!data.sound; svcMuteDone=true; saveData(); if(data.sound)play(EV_MODE); dirty=true; } }
-  if(service.releasedEdge){ uint32_t held=millis()-svcDownAt;
-    if(held<SVC_SHORT_MS && !svcPlayerTouched && !svcMuteDone){ data.mode=(data.mode+1)%MODE_COUNT; saveData(); play(EV_MODE); dirty=true; } }
+/* ===========================================================================
+ *                              OLED (U8g2)
+ * ===========================================================================*/
+String ipStr(){ return apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString(); }
+
+void oledShow(){
+  oled.clearBuffer();
+  oled.setFont(u8g2_font_6x12_t_cyrillic);
+  if(state==ST_ROUND_RESULT && winnerMask){
+    int first=-1, cnt=0; for(uint8_t i=0;i<4;i++) if(winnerMask&(1<<i)){ if(first<0)first=i; cnt++; }
+    oled.setCursor(0,13); oled.print("Победа!");
+    char l[24];
+    if(cnt==1) snprintf(l,sizeof(l),"Игрок P%d", first+1);
+    else       snprintf(l,sizeof(l),"Игроки: P%d +%d", first+1, cnt-1);
+    oled.setCursor(0,29); oled.print(l);
+  } else {
+    if(apMode){
+      oled.setCursor(0,12); oled.print("WiFi: "); oled.print(AP_SSID);
+      oled.setCursor(0,28); oled.print(AP_IP);
+    } else {
+      char l1[24]; snprintf(l1,sizeof(l1),"Reflex v%s", FW_VERSION);
+      oled.setCursor(0,12); oled.print(l1);
+      oled.setCursor(0,28); oled.print(ipStr().c_str());
+    }
+  }
+  oled.sendBuffer();
+}
+
+void oledMsg(const char* a, const char* b){
+  oled.clearBuffer(); oled.setFont(u8g2_font_6x12_t_cyrillic);
+  oled.setCursor(0,13); oled.print(a);
+  oled.setCursor(0,29); oled.print(b);
+  oled.sendBuffer();
+}
+
+/* колбэк WiFiManager: когда поднялась настроечная точка */
+void onPortal(WiFiManager* m){
+  oled.clearBuffer(); oled.setFont(u8g2_font_6x12_t_cyrillic);
+  oled.setCursor(0,13); oled.print("WiFi: "); oled.print(SETUP_AP);
+  oled.setCursor(0,29); oled.print("сайт "); oled.print(AP_IP);
+  oled.sendBuffer();
 }
 
 /* ===========================================================================
  *                                SETUP
  * ===========================================================================*/
 void setup(){
-  Serial.begin(115200); Serial.println(F("\nReflex v0.3.1"));
-  for(uint8_t i=0;i<4;i++) btnInit(players[i],BTN_PIN[i]); btnInit(service,PIN_SERVICE);
+  Serial.begin(115200); Serial.println(F("\nReflex v0.5.0 (lite)"));
+
+  for(uint8_t i=0;i<4;i++) btnInit(players[i],BTN_PIN[i]);
 
   pinMode(PIN_BUZZER,OUTPUT); GPOC=(1<<PIN_BUZZER);
   timer1_isr_init(); timer1_attachInterrupt(onTimer1); timer1_enable(TIM_DIV16,TIM_EDGE,TIM_LOOP); timer1_write(2500);
 
+  oled.begin(); oled.enableUTF8Print();
+  oledMsg("Reflex", "запуск...");
+
   if(!LittleFS.begin()){ LittleFS.format(); LittleFS.begin(); }
   loadData();
-
   randomSeed(ESP.getCycleCount()^micros());
 
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, (AP_PASS[0]? AP_PASS : nullptr));
+  /* --- Wi-Fi: пробуем сохранённую сеть, иначе настроечная точка --- */
+  WiFi.mode(WIFI_STA);
+  WiFiManager wm;
+  wm.setAPCallback(onPortal);
+  wm.setConfigPortalTimeout(180);            // 3 минуты на настройку, потом продолжаем
+  bool ok = wm.autoConnect(SETUP_AP);
+  if(ok){ apMode=false; }
+  else  { WiFi.mode(WIFI_AP); WiFi.softAP(AP_SSID); apMode=true; }   // откат в свою точку
 
   http.on("/", HTTP_GET, [](){ http.sendHeader("Content-Encoding","gzip");
     http.send_P(200,"text/html",(const char*)INDEX_HTML_GZ,INDEX_HTML_GZ_LEN); });
@@ -281,7 +346,9 @@ void setup(){
   http.begin();
   ws.begin(); ws.onEvent(onWsEvent);
 
-  play(EV_BOOT); enterState(ST_IDLE);
+  play(EV_BOOT);
+  enterState(ST_IDLE);
+  oledShow();
 }
 
 /* ===========================================================================
@@ -293,7 +360,6 @@ void loop(){
 
   switch(state){
     case ST_IDLE:
-      if(service.stable || service.releasedEdge){ handleServiceIdle(); break; }
       if(anyPlayerHeld()){ enterState(ST_REGISTERING); play(EV_ARM); }
       break;
 
@@ -303,7 +369,7 @@ void loop(){
         for(uint8_t i=0;i<4;i++){ isPlayer[i]=players[i].stable; if(isPlayer[i])cnt++; }
         randomSeed(ESP.getCycleCount()^micros());
         if(cnt>=2) startSeries(); else { play(EV_FALSE); enterState(ST_IDLE); } }
-      else if((millis()-lastBroadcast)>=BROADCAST_MS) dirty=true;   // живой отсчёт
+      else if((millis()-lastBroadcast)>=BROADCAST_MS) dirty=true;
       break;
 
     case ST_SERIES_START: { bool allRel=true; for(uint8_t i=0;i<4;i++) if(isPlayer[i]&&players[i].stable) allRel=false;
@@ -342,4 +408,8 @@ void loop(){
   }
 
   if(dirty || (millis()-lastBroadcast)>=BROADCAST_MS) broadcast();
+
+  /* OLED: обновляем при смене состояния и раз в секунду */
+  static int8_t oledLast=-1; static uint32_t oledTick=0;
+  if(state!=oledLast || (millis()-oledTick)>=OLED_TICK_MS){ oledLast=state; oledTick=millis(); oledShow(); }
 }
