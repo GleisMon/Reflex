@@ -15,7 +15,7 @@ label so a device only ever pulls its own binary during OTA updates.
 
 | Variant | Folder | Status | Scoreboard | Notes |
 |---------|--------|--------|------------|-------|
-| **Lite** (`lite`) | `firmware/reflex/` | active — **v0.5.0** | phone (web) | Wi-Fi menu, small I2C OLED for IP + winner, no service button |
+| **Lite** (`lite`) | `firmware/reflex/` | active — **v0.5.1** | phone (web) | Wi-Fi menu, small I2C OLED for IP + winner, no service button |
 | **TFT** (`tft`) | `firmware/reflex-tft/` | paused — v0.4.0 | on-board screen | native colour TFT; awaiting a replacement ILI9341 2.8" display |
 
 The TFT build is paused: the original ST7789 module turned out to be dead, so the
@@ -74,6 +74,20 @@ page over WebSocket. Two maintenance commands were added: `{"set":"reset"}`
 clears all scores, `{"set":"wifi","val":"reset"}` forgets the saved network so
 you can reconfigure.
 
+**Reset to Setup (no USB):** in idle, hold **P1 alone**. The first 5 s are a
+safety delay (ignored). After that, a warning with a 3-second progress bar shows
+on the OLED; keep holding to the end (8 s total) to wipe the saved network and
+reboot into the *Reflex-Setup* portal. Release any time to cancel.
+
+## OTA updates
+
+- **Web upload:** open `http://<device-ip>/update` in a browser, pick a compiled
+  `firmware.bin` (Arduino IDE → *Sketch → Export Compiled Binary*) and upload —
+  the device flashes and reboots. The OLED shows progress for IDE uploads.
+- **ArduinoOTA:** after the first USB flash, the device appears as a network port
+  in the Arduino IDE (hostname `reflex`) for wireless uploads. Most reliable when
+  the device is joined to your Wi-Fi (STA mode).
+
 ## Firmware
 
 Arduino IDE, board *LOLIN(WeMos) D1 R2 & mini*. Open the variant you want
@@ -84,7 +98,11 @@ Libraries (Library Manager, one click each) for **Lite**:
 - **WiFiManager** by tzapu
 - **U8g2** by oliver (kraus) — Cyrillic-capable OLED fonts
 - **WebSockets** by Markus Sattler (Links2004 / arduinoWebSockets)
-- `ESP8266WiFi`, `ESP8266WebServer`, `LittleFS` — bundled with the core
+- `ESP8266WiFi`, `ESP8266WebServer`, `ESP8266HTTPUpdateServer`, `ArduinoOTA`,
+  `LittleFS` — bundled with the core
+
+For OTA, pick a flash layout that reserves OTA space in the IDE (Tools → Flash
+Size), e.g. *4MB (FS:1MB OTA:~1019KB)*.
 
 The web page is gzip-compressed into `index_html_gz.h` and served from flash;
 state and settings travel over WebSocket (port 81).
@@ -104,8 +122,8 @@ over WebSocket. Settings (stored in LittleFS on the device):
 
 OTA updates are staged on the Lite branch:
 
-- `v0.5.1` — web upload (flash a `.bin` from the device's own page) + ArduinoOTA
-  (upload from the IDE over Wi-Fi, no USB).
+- `v0.5.1` — **done:** web upload (flash a `.bin` from the device's own
+  `/update` page) + ArduinoOTA (upload from the IDE over Wi-Fi, no USB).
 - `v0.5.2` — self-update from GitHub: a small `version.json` manifest with a
   per-variant section (version, binary URL, MD5) so each device fetches only its
   own release, plus a quiet "new version available — update" line in the web UI
@@ -121,6 +139,8 @@ OTA updates are staged on the Lite branch:
   (paused — display module was defective; ILI9341 replacement pending)
 - `v0.5.0` — Lite variant: web-only, WiFiManager network menu, I2C OLED for IP and
   winner, service button removed (settings moved to the web UI)
+- `v0.5.1` — OTA (web `/update` upload + ArduinoOTA) and a P1-hold gesture to
+  reset back into the Wi-Fi setup portal (5 s safety + 3 s progress bar)
 
 Conventions: SemVer, conventional commits, architecture discussed before code.
 
